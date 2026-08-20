@@ -1,32 +1,38 @@
 # Incident 1: CrashLoopBackOff
 
-**Incident:** `incident-lab-app` pods stuck in `CrashLoopBackOff` after deploying `v2`.
+**Incident:** After rolling out v2 of the app, both pods went into `CrashLoopBackOff` and never recovered.
 
-**Impact:** All replicas down. `/health` and `/` unreachable through the Service — full outage of the app.
+**Impact:** Complete outage. Neither `/` nor `/health` was reachable through the Service.
 
 **Symptoms:**
-- `kubectl get pods` showed `READY 0/1`, `STATUS Error`, restart count climbing rapidly.
-- Old (`v1`) pods terminating while new (`v2`) pods repeatedly crashed on startup.
+`kubectl get pods` showed restart counts climbing every few seconds - 1, then 2, then 3 - with status flipping between `Error` and `CrashLoopBackOff`. The old v1 pods were being terminated as part of the rollout, so there was no fallback once the new ones started failing.
 
 **Investigation:**
-1. `kubectl get pods` — confirmed restarts climbing on the new ReplicaSet's pods, first sign of a crash loop.
-2. `kubectl describe pod <pod>` —
-   - `Exit Code: 1` (a clean application-level failure, not `137`/OOMKilled).
-   - `Environment:` block only listed `APP_MESSAGE` — `REQUIRED_CONFIG` was missing.
-   - `Events` showed `Warning  BackOff  ...  Back-off restarting failed container` — the mechanism behind `CrashLoopBackOff`.
-3. `kubectl logs <pod>` — showed the actual Python traceback:
-   ```
-   KeyError: 'REQUIRED_CONFIG'
-   ```
-   at `app.py:9`, raised at import time, before Flask starts.
+
+First thing I checked was `kubectl get pods`, just to see how bad it was. Restarts were climbing fast, which told me the container was starting and then dying almost immediately, not hanging or timing out.
+
+From there I ran `kubectl describe pod` on one of the failing pods. Two things jumped out - `Exit Code: 1` (so this wasn't an OOM kill, which shows as 137) and the `Environment` section only listed `APP_MESSAGE`. No `REQUIRED_CONFIG` anywhere, even though I could see in the app code that it should be there. The `Events` section at the bottom also had a `BackOff` warning, which is literally the thing generating the `CrashLoopBackOff` status.
+
+That was a strong enough hint, but I didn't want to guess, so I pulled the actual logs:
+
+```
+kubectl logs <pod>
+```
+
+```
+Traceback (most recent call last):
+  File "/app/app.py", line 9, in <module>
+    REQUIRED_CONFIG = os.environ["REQUIRED_CONFIG"]
+KeyError: 'REQUIRED_CONFIG'
+```
+
+That confirmed it.
 
 **Root Cause:**
-`v2` of the app added a hard requirement on a `REQUIRED_CONFIG` environment variable (`os.environ["REQUIRED_CONFIG"]`, no default). The Kubernetes Deployment manifest was not updated to set this variable when the image was bumped to `v2`, so every container exited immediately on startup with `KeyError`, triggering Kubernetes' crash-loop backoff.
+v2 of the app added a hard requirement on a `REQUIRED_CONFIG` environment variable - no default, so `os.environ["REQUIRED_CONFIG"]` throws if it's missing. The Deployment manifest was never updated to actually set it when I bumped the image tag. Since this line runs at import time, the crash happens before Flask even boots.
 
 **Resolution:**
-Added `REQUIRED_CONFIG` to the Deployment's `env:` block and re-applied. Rollout succeeded; pods reached `Running` with `RESTARTS: 0`; `/health` verified reachable through the Service.
+Added `REQUIRED_CONFIG` to the Deployment's `env:` block and reapplied. Rollout went through cleanly, both pods came up `Running` with `RESTARTS: 0`, and `/health` responded again.
 
 **Preventive Action:**
-- Application code changes that add new required configuration should ship in the same change/PR as the corresponding manifest update, and ideally be caught in CI (e.g. a check that diffs required env vars in code against what the Deployment sets).
-- Prefer failing config validation with a clear startup log message over an unhandled `KeyError`, so `kubectl logs` immediately shows "missing config X" instead of a raw traceback.
-- Consider a readiness probe on `/health` so Kubernetes (and dashboards) reflect "not ready" distinctly from "crashing," giving faster signal separation between config errors and slow-starting-but-healthy pods.
+The actual mistake here wasn't the missing env var, it was shipping a code change that required new config without updating the deployment in the same step. In a real pipeline I'd want this caught by CI before it ever reaches a cluster - something that fails the build if the app declares a required env var the manifest doesn't set. I'd also rather see this fail with a clear log line like `missing required config: REQUIRED_CONFIG` than a raw Python traceback, since that's a lot faster to read at 2am.

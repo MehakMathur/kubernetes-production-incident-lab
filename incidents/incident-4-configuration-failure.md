@@ -1,28 +1,26 @@
 # Incident 4: Configuration Failure (ConfigMap Key Mismatch)
 
-**Incident:** New `incident-lab-app` pod stuck in `CreateContainerConfigError`.
+**Incident:** New pod stuck in `CreateContainerConfigError` after I moved `APP_MESSAGE` from a hardcoded value into a ConfigMap and then (deliberately) typo'd the key reference.
 
-**Impact:** No outage — old pods (from the previous, correctly-configured ReplicaSet) stayed `Running` throughout, same rolling-update protection seen in Incident 2. The deploy itself was blocked.
+**Impact:** No real outage - same as incident 2, the old pods kept running since the new one never came up. The deploy was just stuck.
 
 **Symptoms:**
-- `kubectl get pods` showed the new pod stuck at `0/1`, status `ContainerCreating` → `CreateContainerConfigError`.
-- Old pods, already running with the correct config, were unaffected.
+New pod sat at `0/1`, went `ContainerCreating` then `CreateContainerConfigError`. Old pods untouched.
 
 **Investigation:**
-1. `kubectl get pods` — spotted the stuck pod, a fourth distinct status pattern from the previous three incidents.
-2. `kubectl describe pod <pod>` — `Events` showed the image had already pulled successfully (`already present on machine`), but:
-   ```
-   Warning  Failed  ...  Error: couldn't find key APP_MSG in ConfigMap default/incident-lab-config
-   ```
-   This fails even earlier in the pod lifecycle than Incident 2's `ImagePullBackOff` — the image is present, but the container spec itself can't be resolved, so no container is ever created (no logs possible, same as Incident 2, but for a different reason).
+`kubectl describe pod` again had the answer, and it's worth noting this fails at a different point than incident 2 - the image had already pulled fine (`already present on machine`), but the container still couldn't be created:
+
+```
+Error: couldn't find key APP_MSG in ConfigMap default/incident-lab-config
+```
+
+I'd referenced the key as `APP_MSG` in the Deployment's `configMapKeyRef`, but the actual key in the ConfigMap was `APP_MESSAGE`. Small typo, same failure class as incident 3 in spirit - two files that are supposed to agree on a name, and don't.
 
 **Root Cause:**
-The app's configuration was moved into a ConfigMap (`incident-lab-config`, key `APP_MESSAGE`) referenced by the Deployment via `env[].valueFrom.configMapKeyRef`. The Deployment was updated to reference the key as `APP_MSG` — a typo/rename that didn't match the actual key defined in the ConfigMap.
+Key name mismatch between the ConfigMap (`APP_MESSAGE`) and the Deployment's reference to it (`APP_MSG`).
 
 **Resolution:**
-Corrected the `key:` field in the Deployment's `configMapKeyRef` back to `APP_MESSAGE`, matching the ConfigMap. Reapplied; the bad pod terminated, and `/` verified returning the ConfigMap-sourced message correctly.
+Fixed the key name in the Deployment, reapplied. Bad pod terminated on its own, and the response confirmed the ConfigMap value was actually being read (`"Hello from a ConfigMap!"`).
 
 **Preventive Action:**
-- Keep ConfigMap keys and their references co-located or generated from the same source (e.g. Kustomize `configMapGenerator`) rather than hand-typed in two separate files, so a rename in one is forced to update the other.
-- `CreateContainerConfigError` should be a known, documented pattern for on-call engineers: it means "check ConfigMap/Secret references," not "check the app code" — the app never even got a chance to run.
-- A pre-deploy validation step (e.g. `kubectl apply --dry-run=server` or a CI check that cross-references ConfigMap keys against Deployment `configMapKeyRef` usage) would have caught this before it ever reached the cluster.
+Generating the ConfigMap and its references from a single source (Kustomize's `configMapGenerator`, for example) instead of hand-typing the key name in two places would remove this failure mode entirely. Also good to just know as a pattern: `CreateContainerConfigError` almost always means "go check ConfigMap/Secret references," not "go read the app code" - the app never got the chance to run at all here.

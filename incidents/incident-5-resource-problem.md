@@ -1,31 +1,32 @@
 # Incident 5: Resource Problem (OOMKilled)
 
-**Incident:** `incident-lab-app` pods repeatedly `OOMKilled` after resource limits were added to the Deployment.
+**Incident:** Both pods stuck in a kill loop after I added resource limits to the Deployment for the first time.
 
-**Impact:** Full outage. Unlike Incidents 2 and 4, the rolling update proceeded past both replicas before the new pods' failures were caught, because kubelet briefly reports a container as started before the OOM kill lands — leaving zero healthy pods for a period.
+**Impact:** This was the only one of the five that turned into a genuine full outage. Both old pods got rotated out even though the new ones never stabilized - I didn't expect that at first, since incidents 2 and 4 both left the old pods alone. The difference is that these pods did briefly report `Running` before getting killed, which was apparently enough for the rollout to treat them as "started" and move on to retiring the old ones.
 
 **Symptoms:**
-- `kubectl get pods` showed new pods cycling `Running` → `OOMKilled`, restart count climbing.
-- Old, previously-healthy pods were terminated as part of the rollout despite the new pods never stabilizing.
+`kubectl get pods` showed `OOMKilled` directly as the status, restarts climbing, and - unlike the earlier incidents - zero healthy pods at one point.
 
 **Investigation:**
-1. Before making the change, `kubectl top pods` showed actual usage of **~21Mi** per pod — this measurement is what exposed the mistake before/after.
-2. `kubectl get pods` — showed `STATUS: OOMKilled` directly, a distinct and explicit status (unlike Incident 1's generic `Error`).
-3. `kubectl describe pod <pod>` — confirmed:
-   ```
-   State:       Terminated
-     Reason:    OOMKilled
-     Exit Code: 137
-   ```
-   Exit code `137` = `128 + 9` (SIGKILL) — the kernel's OOM killer terminating the process outright, not the application exiting on its own (contrast with Incident 1's `Exit Code: 1`, a normal application-level failure).
+Before I even added the limits, I ran `kubectl top pods` out of curiosity (this needed metrics-server installed first, since kind doesn't ship it by default - that itself is worth remembering, `kubectl top` silently does nothing without it). Actual usage was sitting around 21Mi per pod.
+
+I set the memory limit to 16Mi. In hindsight, obviously too low given what I'd just measured, but I wanted to see what actually happens rather than just read about it.
+
+`kubectl describe pod` confirmed exactly what I expected:
+
+```
+State:       Terminated
+  Reason:    OOMKilled
+  Exit Code: 137
+```
+
+137 is 128 + 9 (SIGKILL) - the kernel's OOM killer, not the app failing on its own. Different animal entirely from incident 1's `Exit Code: 1`.
 
 **Root Cause:**
-The Deployment was given a memory `limit` of `16Mi`, set without checking actual usage. Measured real usage (~21Mi) already exceeded this limit, so every container was killed by the kernel almost immediately after starting, regardless of load.
+Memory limit (16Mi) set lower than the app's actual measured usage (~21Mi), guaranteeing an OOM kill on every single startup.
 
 **Resolution:**
-Set `requests.memory: 64Mi` / `limits.memory: 128Mi` (and matching modest CPU values) based on the actual measured footprint plus headroom. Reapplied; both pods stable at `Running`, `RESTARTS: 0`; `kubectl top pods` confirmed real usage (~21-22Mi) comfortably inside the new limit; `/health` verified reachable.
+Bumped it to `requests: 64Mi` / `limits: 128Mi`, based on the number I'd actually measured plus real headroom. Reapplied - both pods came up clean, `kubectl top pods` showed ~21-22Mi again, comfortably under the new limit this time.
 
 **Preventive Action:**
-- Never set resource `limits` from a guess — measure actual usage with `kubectl top pods` (or a load test under realistic traffic) before setting them, and revisit after any code/dependency change that could shift memory footprint.
-- Memory limits should include meaningful headroom above steady-state usage (this fix used roughly 6x measured usage for the limit) to absorb spikes without killing the process outright.
-- `OOMKilled` + `Exit Code: 137` should be an instant, unambiguous signal for on-call engineers to check `resources.limits.memory` first — it's a different failure class from a code-level crash (Incident 1) and doesn't need a code-level fix.
+Don't set memory limits from a guess - measure first with `kubectl top` (or under actual load) and leave real headroom above it, then revisit any time the app or its dependencies change. And as a triage shortcut: `OOMKilled` + exit code `137` should point straight at `resources.limits.memory`, not at the code - it's a completely different category of bug from a crash.
