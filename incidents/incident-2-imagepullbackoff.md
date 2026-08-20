@@ -1,34 +1,49 @@
 # Incident 2: ImagePullBackOff
 
-**Incident:** A new pod got stuck at `0/1` after I updated the Deployment to point at `incident-lab-app:v3`.
+For this incident, I changed the image version in my Kubernetes Deployment from `v2` to `v3`.
 
-**Impact:** Honestly, less bad than it looked at first. The two existing v2 pods stayed `Running` the whole time - the rollout just never finished, it didn't take anything down. That's the rolling update default doing its job: it won't kill old pods until new ones are actually ready.
+After applying the change, I ran:
 
-**Symptoms:**
-`kubectl get pods` showed the new pod sitting at `0/1`, status `ErrImagePull`, which after a bit turned into `ImagePullBackOff`. Restart count stayed at 0 the whole time, which is a difference from incident 1 - there's no container running yet to restart.
+`kubectl get pods`
 
-**Investigation:**
-My first instinct was to check the logs, same as last time:
+and noticed that the new pod was stuck at `0/1`. At first it showed `ErrImagePull`, and after some time it changed to `ImagePullBackOff`.
 
-```
-kubectl logs <pod>
-```
+One thing I noticed was that my old v2 pods were still running, so the application was actually still available. Kubernetes was trying to start the new version before removing the existing working pods.
 
-That didn't work - "no container found" or similar. Makes sense once I thought about it: if the image can't even be pulled, there's no container, so there's nothing to log. That absence is itself a clue - if `kubectl logs` gives you nothing, stop thinking about the app code and look at the image/scheduling side instead.
+## Troubleshooting
 
-`kubectl describe pod` had the real answer in the Events section:
+My first thought was to check the logs:
 
-```
-Failed to pull image "incident-lab-app:v3": failed to resolve reference
-"docker.io/library/incident-lab-app:v3": pull access denied, repository
-does not exist or may require authorization
-```
+`kubectl logs <pod-name>`
 
-**Root Cause:**
-`v3` was never actually built or loaded into the kind cluster - I bumped the tag in the manifest without building/loading the image first. Since this image only exists locally (not on Docker Hub), every pull attempt failed the same way.
+But there weren't really any logs to check.
 
-**Resolution:**
-Reverted the image tag back to `v2`, which was already loaded. Reapplied, rollout finished, bad pod got cleaned up, `/health` came back.
+This helped me understand something important — the container never actually started. Kubernetes couldn't get the Docker image in the first place, so there was no running container generating application logs.
 
-**Preventive Action:**
-Build (or `kind load`) has to happen before the manifest ever references the new tag - not after, not "at the same time." I'd also want rollout status checked automatically as part of any deploy step (`kubectl rollout status`) so a stuck rollout like this gets flagged instead of just sitting there quietly. One thing worth remembering for on-call triage specifically: check what's still `Running` before assuming a failing pod means an outage - in this case it didn't.
+I then checked:
+
+`kubectl describe pod <pod-name>`
+
+The Events section showed that Kubernetes was failing to pull:
+
+`incident-lab-app:v3`
+
+That's when I realized what I had done. I updated the Deployment to use `v3`, but I had never actually built that image or loaded it into my kind cluster.
+
+## Fix
+
+I changed the image back to `incident-lab-app:v2`, which was already available in the cluster, and applied the Deployment again.
+
+After that, the rollout completed successfully and the pods were running normally.
+
+## What I learned
+
+The main thing I understood from this incident is the difference between `CrashLoopBackOff` and `ImagePullBackOff`.
+
+With `CrashLoopBackOff`, the container is able to start, but something causes it to crash and Kubernetes keeps restarting it.
+
+With `ImagePullBackOff`, Kubernetes can't even get the image needed to create the container, so the container never starts.
+
+I also learned not to jump straight to application logs every time something goes wrong. The pod status and the Events section from `kubectl describe` can tell me which stage is actually failing.
+
+And before updating a Deployment with a new image tag, I need to make sure that image actually exists and is available to the cluster.
