@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: incident-lab-app
+  labels:
+    app: incident-lab-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: incident-lab-app
+  template:
+    metadata:
+      labels:
+        app: incident-lab-app
+    spec:
+      containers:
+        - name: incident-lab-app
+          image: incident-lab-app:v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5000
+          env:
+            - name: APP_MESSAGE
+              value: "Hello from the Incident Lab app!"
