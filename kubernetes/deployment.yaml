@@ -22,6 +22,9 @@ spec:
             - containerPort: 5000
           env:
             - name: APP_MESSAGE
-              value: "Hello from the Incident Lab app!"
+              valueFrom:
+                configMapKeyRef:
+                  name: incident-lab-config
+                  key: APP_MESSAGE
             - name: REQUIRED_CONFIG
               value: "production"
