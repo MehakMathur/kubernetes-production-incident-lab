@@ -28,3 +28,10 @@ spec:
                   key: APP_MESSAGE
             - name: REQUIRED_CONFIG
               value: "production"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
