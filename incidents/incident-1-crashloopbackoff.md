@@ -5,7 +5,8 @@
 **Impact:** Complete outage. Neither `/` nor `/health` was reachable through the Service.
 
 **Symptoms:**
-`kubectl get pods` showed restart counts climbing every few seconds - 1, then 2, then 3 - with status flipping between `Error` and `CrashLoopBackOff`. The old v1 pods were being terminated as part of the rollout, so there was no fallback once the new ones started failing.
+`kubectl get pods` showed restart counts climbing every few seconds - 1, then 2, then 3 - with status flipping between `Error` and `CrashLoopBackOff`.
+The old v1 pods were being terminated as part of the rollout, so there was no fallback once the new ones started failing.
 
 **Investigation:**
 
