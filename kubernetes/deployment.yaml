@@ -16,10 +16,12 @@ spec:
     spec:
       containers:
         - name: incident-lab-app
-          image: incident-lab-app:v1
+          image: incident-lab-app:v2
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5000
           env:
             - name: APP_MESSAGE
               value: "Hello from the Incident Lab app!"
+            - name: REQUIRED_CONFIG
+              value: "production"

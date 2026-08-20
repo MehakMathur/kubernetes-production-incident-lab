@@ -5,6 +5,9 @@ app = Flask(__name__)
 
 APP_MESSAGE = os.environ.get("APP_MESSAGE", "Hello from the Incident Lab app!")
 
+# Required at startup as of v2 - no default, will raise KeyError if missing
+REQUIRED_CONFIG = os.environ["REQUIRED_CONFIG"]
+
 
 @app.route("/")
 def index():
